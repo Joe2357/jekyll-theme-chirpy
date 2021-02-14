@@ -34,7 +34,7 @@ twitter:
   username: twitter_username            # change to your twitter username
 
 social:
-  name: your_full_name                  # it will shows as the copyright owner in Footer
+  name: Joe2357                  # it will shows as the copyright owner in Footer
   email: deviljoe996@gachon.ac.kr             # change to your email address
   links:
     # The first element serves as the copyright owner's link
@@ -69,7 +69,7 @@ google_analytics:
 #     light  - Use the light color scheme
 #     dark   - Use the dark color scheme
 #
-theme_mode:   # [light|dark]
+theme_mode: dark  # [light|dark]
 
 # The CDN endpoint for images.
 # Notice that once it is assigned, the CDN url
@@ -89,6 +89,12 @@ disqus:
   shortname: ''    # Fill with your Disqus shortname. › https://help.disqus.com/en/articles/1717111-what-s-a-shortname
 
 paginate: 10
+
+markdown: kramdown
+highlighter: rough
+lsi: false
+excerpt_separator: "\n\n"
+incremental: false
 
 # ------------ The following options are not recommended to be modified ------------------
 
