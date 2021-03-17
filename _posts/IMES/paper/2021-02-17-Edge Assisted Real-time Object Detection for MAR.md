@@ -320,7 +320,278 @@ use_math: true
 
 ## Implementation
 
+- 상용 하드웨어에서 동작할 수 있도록 구현하였음
+
+### 1. Hardware Setup
+
+- AR 기기 : mobile development board인 Nvidia Jetson TX2 사용
+  - Magic Leap One AR glass와 같은 mobile SoC를 사용
+  - WiFi 연결 : TP-Link AC1900 라우터 사용
+- edge cloud : PC 사용
+  - Intel i7-6850K CPU
+  - Nvidia Titan XP GPU
+  - 라우터와 1Gbps의 이더넷으로 연결
+- 2개의 device 모두 Ubuntu 16.04 OS 사용
+
+### 2. Software Implementation
+
+- 고안한 기술들을 아래의 list에 기반하여 제작
+  - Nvidia JetPack
+  - Nvidia Multimedia API
+  - Nvidia TensorRT
+  - Nvidia Video Codec SDK
+
+##### client side
+
+- client측 기능을 Nvidia Jetson TX2에 구현 ( JetPack SDK 사용 )
+  - 기본 설계도를 따름
+- 카메라 캡처 session 제작 : JetPack 카메라 API를 이용하여 60fps에서 동작
+- 비디오 인코더를 frame consumer로 등록 : 멀티미디어 API 이용
+  - RoI 인코딩 모듈을 알아야 함 -> edge cloud에서 생성된 RoI를 기반으로 다음 frame을 인코딩해야함
+    - `setROIParams()` 함수 사용 : RoI와 QP delta value 설정
+- 외부 RPS control mode 이용 : 각 frame의 reference frame을 source frame의 현재 캐시된 탐지 결과로 설정
+  - 추출된 motion vector로 캐시된 탐지 결과를 shift할 수 있음
+- *Parallel Streaming and Inference* 모듈 구현해야함 : 비디오 인코더의 slice mode를 활성화
+  - `setSliceLength()` 함수 사용 : 적절한 길이를 전해주어 인코더가 frame을 4개의 slice로 분할할 수 있도록 함
+  - `getMetadata()` 함수 사용 : slice 인코딩 후, 각 slice에서 motion vector와 macroblock type을 얻음
+    - 2개의 다른 thread ( 렌더링 / offloading ) 에서 각각 *Adaptive Offloading* / *MvOT* 의 input으로 사용
+      - offloading thread : 현재 frame을 offload할 것이라고 정했다면, 4개의 slice로 분할하여 무선 link를 통해 하나하나 server로 전달할 것
+      - 렌더링 thread : 모션벡터 기반 빠른 object tracking 기법이 추출된 모션벡터와 이전 결과 캐시값을 이용하여 fast object tracking 실현
+        - 이후 탐지 결과에 따라 그 위치에 가상 오버레이를 렌더링
+
+##### server side
+
+- 2개의 main module 포함 ( 서로 다른 thread에서 동작하도록 설계되어 **서로 block하지 않음** )
+  - Parallel Decoding
+    - AR 기기로부터 slice 입력을 받을 때까지 계속 wait
+    - slice를 받으면 video decoder에게 <u>비동기식 mode로 디코드 지시</u> -> system을 block하지 않음
+    - Nvidia Video Codec SDK 사용 ( Titan Xp GPU의 비디오 디코더의 하드웨어 가속 이점을 챙기기 위함 )
+    - 각 slice를 encode하면 인코더에 부착된 `callback()` 함수에 의해 inference thread로 전달됨
+  - Parallel Inference
+    - Nvidia TensorRT 사용 ( Nvidia GPU에서 딥러닝 추론 optimizer로써 높은 성능을 보임 )
+    - 서버측 PC의 inference latency의 한계를 넘기 위해 INT8 calibration tool 사용 -> 객체탐지 모델 optimize / 같은 setup에서 3~4배의 latency 효율
+    - *Dependency Aware Inference* 메소드 달성해야함 : `PluginLayer`를 convolution / pooling layer에 추가
+      - 방정식 (2)에 기반하여 region의 input / output 크기를 조정하기 위함
+    - 탐지한 결과 ( QP map ) 을 AR 기기로 전송 ( 다음에 쓰일수도 있음 )
+
+## Evaluation
+
+- 시스템의 전체 성능 평가
+  - detection 정확도
+  - detection latency
+  - end-to-end tracking and rendering latency
+  - offloading latency
+  - bandwidth 소모
+  - resource 소모
+- 이 시스템은 높은 정확도와 낮은 latency를 이루었음
+- 결과
+  - 탐지 정확도 향상 ( 20.2% ~ 34.8% )
+  - false detection rate 낮춤 ( 27% ~ 38.2% )
+  - offload latency 낮춤 ( 32.4% ~ 50.1% )
+  - MvOT 메소드에서 평균 2.24ms 시간 소요 ( 렌더링할 시간과 리소스 남김 )
+
+### 1. Experiment Setup
+
+- 이전에 언급한 실험 환경을 동일하게 사용
+- 2개의 다른 detection task 설계 ( 성능실험 )
+  - object detection task
+    - edge에서 Faster R-CNN object detection model 수행
+    - 각 offload frame에서 객체의 bounding box를 생성
+  - keypoint detection task
+    - edge에서 Keypoint Detection Mask R-CNN model 수행
+    - human body keypoint 탐지
+- 결과를 탐지하여 AR 기기가 user의 왼손에 cube를 렌더링할 것
+- AR 기기는 60fps 설정으로 모델을 돌림
+- AR 기기와 server 연결 WiFi 설정은 2가지 ( 2.4GHz, 5GHz )
+  - bandwidth : 82.8Mbps / 276Mbps
+
+### 2. Object Detection Accuray
+
+- 시스템 : 변화하는 네트워크 환경에서 <u>높은 정확도 + 낮은 false detection 확률</u>을 달성
+
+- 4가지 접근법으로 탐지 정확도 측정
+
+  - 기본 솔루션 ( baseline )
+  - 기본 솔루션 + 2가지의 latency optimization 기술
+  - 기본 솔루션 + 모션벡터 기반 메소드
+  - 기본 솔루션 + 모든 고안된 기술
+
+- 2개의 주요 metric으로 탐지 정확도 평가
+
+  - 탐지 정확도 평균치
+  - false detection rate
+
+- 60fps로 각 video의 추출된 frame을 client측 video encoder에게 공급하여 카메라를 emulate
+
+  - 그러나 video frame에서의 반복 가능한 motion experiment를 허용
+
+- 각 frame에서의 탐지 정확도 계산 방법 : MvOT와 ground truth detection result 사이의 IoU나 OKS 평균치를 계산
+
+  - OKS : object keypoint similarity
+    - keypoint의 탐지된 위치, ground truth label 사이의 정규화 유클리드 distance로 묘사 ( 0 ~ 1 )
+  - IoU : detection bounding box와 ground truth bounding box의 교차면적
+
+- 정확도 향상 결과
+
+  |             task              | WiFi 2.4GHz | WiFi 5GHz  |
+  | :---------------------------: | :---------: | :--------: |
+  |     object detection case     | 23.4% 향상  | 20.2% 향상 |
+  | human keypoint detection case | 34.8% 향상  | 24.6% 향상 |
+
+  - low latency offloading 기술 / fast object tracking 기술 모두 latency를 줄임으로써 **정확도 향상에 기여**
+
+- 측정한 detection accuracy를 CDF로 그림
+
+  - 수용 가능한 정확도를 정하기 위해 2개의 threshold 값을 도입 ( 컴퓨터 비전에서 사용됨 )
+    - 0.5 ( 느슨함 )
+    - 0.75 ( 엄격함 )
+  - 탐지 정확도가 정확도 metric보다 낮은 detected bounding box / set of keypoint : false detection으로 간주
+  - AR / MR 시스템에서의 높은 품질 요구 : 엄격한 정확도 metric을 사용할 것 ( 0.75 threshold )
+
+- 결과
+
+  |                   task                   | WiFi 2.4GHz | WiFi 5GHz |
+  | :--------------------------------------: | :---------: | :-------: |
+  |     object detection ( false rate )      |   10.68%    |   4.34%   |
+  |     object detection ( reduce rate )     |    33.1%    |    27%    |
+  | human keypoint detection ( false rate )  |             |           |
+  | human keypoint detection ( reduce rate ) |    38.2%    |   34.9%   |
+
+  - 추가로, delay에 따라서 결과가 제대로 오버레이되지 않을 수 있음
+
+##### impact of background network traffic
+
+- 고안된 시스템은 background의 네트워크 부하에 영향을 크게 받지 않는다
+
+- 네트워크 부하 실험 ( 0% -> 90%로의 load 추가 )
+
+  |    system     | WiFi 2.4GHz | WiFi 5GHz |
+  | :-----------: | :---------: | :-------: |
+  |   baseline    |   49.84%    |   35.6%   |
+  | 고안된 system |   21.97%    |  15.58%   |
+
+### 3. Obejct Tracking Latency
+
+- 이전 탐지 object를 새로운 frame에 위치를 조정하는 데 걸리는 시간 : 2.24ms
+
+  - AR 기기가 충분한 시간과 resource를 확보 가능
+  - frame 간격 사이에 높은 품질의 가상 오버레이를 렌더링할 수 있음
+
+- 다른 기술과의 비교
+
+  | technique | tracking latency |
+  | :-------: | :--------------: |
+  |   MvOT    |      2.24ms      |
+  |   OF-LK   |      8.53ms      |
+  |   OF-HS   |     79.01ms      |
+
+  - MvOT : 약 75%의 GPU resource를 아낌
+  - 다른 기술들이 MvOT보다 정확도가 높지만, **latency 때문에 정확도가 떨어짐**
+
+### 4. End-to-End Tracking and Rendering Latency
+
+- smooth한 AR experience를 하기 위해서는 60fps에서는 16.7ms의 inter-frame time안에 end-to-end latency가 있어야 한다
+  - **1s를 60fps로 나눈 16.7ms마다 결과를 보여줄 수 있어야 한다**
+- 기본적으로 MvOT를 이용한 latency가 2.24ms이므로, 렌더링 등에 쓰일 수 있는 latency가 14ms나 됨
+- 16.7ms 안에 모든 절차를 수행할 수 있고 높은 품질의 AR experience를 제공할 수 있음
+
+### 5. Offloading Latency
+
+- RoI 인코딩 기술 + Parallel Streaming and Inference 기술 : offload latency를 획기적으로 줄일 수 있음
+- offloading latency = streaming latency + inference latency ( 2개는 parallel하게 동작함 )
+- 평균 인코딩 latency : 1.6ms // 이 system을 사용하면 1ms 미만으로 줄일 수 있음
+- 결과
+  - baseline에서는 offloading latency : 34.56ms ( 2.4GHz ) / 22,96ms ( 5GHz )
+  - RDE 추가 : streaming latency를 8.33ms / 2.94ms로 낮출 수 있음
+  - RDE + PSI 추가 : 전체 offloading latency를 17.23ms / 15.52ms로 낮출 수 있음
+- 이 기술은 **bandwidth가 작은 연결에서 offloading latency를 획기적으로 줄일 수 있음**
+
+### 6. Bandwidth Consumption
+
+- *DRE* 기술 + *Adaptive Offloading* 기술 : bandwidth 소모를 줄일 수 있음
+- bandwidth 소모 측정 ( 3가지 관점 )
+  - baseline
+  - DRE 추가
+  - DRE + adaptive offloading
+- 각 실험에서 frame을 인코딩하기 위한 base 품질을 제어하기 위한 QP 제공 ( 5, 10, 15, 20, 25, 30, 35 )
+- DRE : 검출된 RoI를 기준으로 인코딩 품질을 조정할 것
+- adaptive offloading : 각 frame을 edge cloud로 보낼 것인지 결정
+- 결과
+  - DRE + adaptive offloading 기술을 사용한 것이 같은 bandwidth 사용량 당 정확도가 가장 높았음
+  - 유사하게, 정확도를 같이 맞춘다면 ( 0.9 ), bandwidth 소모량을 baseline보다 62.9% 낮출 수 있었음
+
+### 7. Resource Comsumption
+
+- 고안된 시스템은 AR 기기에서의 계산 resource를 매우 적게 사용함
+- 객체탐지 task 실행 ( 어떠한 렌더링 task 없이 순수하게 )
+  - 20분 동안의 DrivingPOV 영상 사용
+  - JetPack의 *tegrastats* tool 사용 : CPU / GPU의 사용량 측정 목적
+- 결과
+  - 고안된 시스템이 기존에 비해 15%의 CPU자원 / 13%의 GPU자원만을 사용함
+  - 나머지 resource는 남겨져 AR / MR 시스템에서 높은 품질의 그래픽을 렌더링할 때 사용됨
+
+## Related Work
+
+##### mobile AR
+
+- 모바일 AR 시스템 설계 : 산업 / 아카데미아 분야의 강한 interest
+- ARCore, ARKit : 모바일 AR 플랫폼
+- HoLoLens, Magic Leap One : MR를 실현할 수 있을 것으로 기대되는 플랫폼
+- **하지만 어떤 플랫폼도 object detection을 지원하지 않음** ( 연산 요구가 높음 )
+  - 문제 해결을 위한 플랫폼이 나오기 시작
+  - Vuforia : 기존 feature extraction 접근법을 기반으로 모바일 기기에 object detection plugin 제공
+  - Overlay : 모바일 기기의 센서 data 사용 -> 후보 object의 개수를 줄임
+  - VisualPrint : 추출된 feature만을 cloud로 보내 image offloading의 bandwidth 소모를 줄임
+  - **하지만 위의 기술들은 real-time ( 30fps / 60fps ) 에서 작동하지 못함**
+    - Glimpse : 연속적 object 인식 시스템
+      - 도전적인 network 조건에서 cloud offload를 실행하도록 설계됨
+      - 30fps에서 실행됨
+      - trigger frame만을 cloud로 offload
+      - 시각적 flow 기반 object tracking 방법 사용 -> 나머지 frame의 object bounding box를 업데이트
+      - 시간과 resource를 많이 씀 ( 렌더링할 조건 부족 )
+    - 위와는 다른 부분 탐구 : 설계 공간에서 근처의 edge server에 대한 보다 나은 network latency 안에서 더 높은 품질의 AR / MR을 실현할 수 있는 다른 지점 탐색
+- 고안된 기술들을 활용해 offload latency를 줄임 -> 하나의 frame interval에 끝낼 수도 있음
+  - low-cost의 MvOT : device에 렌더링할 수 있도록 시간과 resource 남김
+
+##### deep learning
+
+- CNN이 최근 기존 hand-craft feature 접근법보다 더 나은 성능 제공
+- Huang et al : 기존 CNN 모델 ( Faster R-CNN, R-FCN, SSD 등 ) 들의 speed / 정확도 tradeoff를 비교
+- 멀티태스킹 학습 : 보다 미세한 검출을 위해 object bounding box 내부의 깊은 특징을 더 재사용할 수 있음
+- 모바일 장치에서 CNN 모델을 효율적으로 실행하는 방법에 대한 연구는 좀 있음
+  - **그 어떤 것도 고품질 AR / MR 시스템에 대한 latency를 충족할 수 없었음**
+
+##### mobile vision offloading
+
 - 
 
+##### adaptive video streaming
 
+- 
+
+## Discussion
+
+##### generality
+
+- 
+
+##### comparison with existing AR tools
+
+- 
+
+##### Limitation
+
+- 
+
+## Conclusion
+
+- 60fps에서 동작하는 AR / MR object detection을 높은 정확도를 이끌어낼 수 있는 시스템을 만들었음
+  - 실현하기 위해 여러 low latency offloading 기술을 고안
+  - AR 기기에서는 렌더링 pipeline을 offloading pipeline과 분리함
+  - fast object tracking 메소드를 사용하여 탐지 정확도를 유지하려함
+- 상용 하드웨어에 시스템 prototype 구현
+  - 정확도 향상 ( 20.2% ~ 34.8% )
+  - false detection 확률 감소 ( 27% ~ 38.2% )
+- AR 기기에서 objec tracking을 하는 것이 resource를 매우 적게 요구함
+  - frame 사이의 렌더링 시간을 꽤 많이 남길 수 있고, 높은 품질의 AR / MR experience를 가능하게함
 
