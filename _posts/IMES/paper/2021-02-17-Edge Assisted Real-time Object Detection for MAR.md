@@ -3,6 +3,7 @@ title: "Edge Assisted Real-time Object Detection for Mobile Augmented Reality"
 categories: [IMES, paper]
 tags: [IMES, paper]
 use_math: true
+
 ---
 
 > 2021 / 3 / 18 IMES 세미나
@@ -257,9 +258,12 @@ use_math: true
 
   - valid region : 가능한 input feature이 출분한 각 convolutional feature map의 영역으로 정의
 
-    - 크기
+    - 크기  
       $$
-      H_{i}^{out}=(H_{i}^{in}-1)/S+1\\
+      H_{i}^{out}=(H_{i}^{in}-1)/S+1
+      $$
+
+      $$
       W_{i}^{out}=
       \begin{cases}
       \frac{W_{i}^{in}-(F-1)/2-1}{S}+1, &\text{i=1,2,...,n-1}\\
@@ -405,7 +409,7 @@ use_math: true
 - AR 기기와 server 연결 WiFi 설정은 2가지 ( 2.4GHz, 5GHz )
   - bandwidth : 82.8Mbps / 276Mbps
 
-### 2. Object Detection Accuray
+### 2. Object Detection Accuracy
 
 - 시스템 : 변화하는 네트워크 환경에서 <u>높은 정확도 + 낮은 false detection 확률</u>을 달성
 
