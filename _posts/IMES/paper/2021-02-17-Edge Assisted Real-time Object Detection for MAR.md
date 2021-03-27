@@ -3,7 +3,6 @@ title: "Edge Assisted Real-time Object Detection for Mobile Augmented Reality"
 categories: [IMES, paper]
 tags: [IMES, paper]
 use_math: true
-
 ---
 
 > 2021 / 3 / 18 IMES 세미나
